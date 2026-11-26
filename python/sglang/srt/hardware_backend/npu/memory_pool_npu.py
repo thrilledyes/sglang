@@ -15,7 +15,7 @@ from sglang.srt.mem_cache.memory_pool import (
     get_tensor_size_bytes,
     unwrap_write_loc,
 )
-from sglang.srt.runtime_context import get_memory, get_parallel
+from sglang.srt.runtime_context import get_flags, get_memory, get_parallel
 from sglang.srt.utils import get_bool_env_var
 from sglang.srt.utils.async_probe import maybe_detect_oob
 from sglang.srt.utils.device import is_npu
@@ -116,7 +116,10 @@ class NPUMHATokenToKVPool(MHATokenToKVPool):
             modelslim_cache_layout is not None
             and modelslim_cache_layout.layout == "gqa_mxfp8"
         )
-        self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
+        self.enable_torch_compile = get_flags().capture.enable_torch_compile
+        self.use_fia = (
+            get_bool_env_var("ASCEND_USE_FIA", "False") or self.enable_torch_compile
+        )
         if self.is_modelslim_mxfp8:
             head_num = modelslim_cache_layout.local_kv_heads
             head_dim = modelslim_cache_layout.key_head_dim
@@ -366,8 +369,13 @@ class NPUMHATokenToKVPool(MHATokenToKVPool):
         # Both FIA and paged-attention buffers share the same physical layout.
         # Opt in at pool initialization, keeping environment reads outside graph
         # capture. Otherwise retain the original writers and their memory usage.
+        # Under npugraph_ex (torch.compile), AOTAutograd functionalizes
+        # npu_scatter_pa_kv_cache into npu_scatter_pa_kv_cache_functional,
+        # which clones the entire per-layer KV cache every decode step (+130ms).
+        # npu_scatter_nd_update_ stays in-place and avoids full-cache clones.
         use_scatter_pa = (
             self.use_scatter_pa_kv_cache
+            and not getattr(self, "enable_torch_compile", False)
             and hasattr(torch_npu, "npu_scatter_pa_kv_cache")
             and self.store_dtype in (torch.float16, torch.bfloat16, torch.int8)
         )
@@ -592,7 +600,10 @@ class NPUMHATokenToKOnlyPool(MHATokenToKOnlyPool):
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
     ):
-        self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
+        self.enable_torch_compile = get_flags().capture.enable_torch_compile
+        self.use_fia = (
+            get_bool_env_var("ASCEND_USE_FIA", "False") or self.enable_torch_compile
+        )
         super(MHATokenToKOnlyPool, self).__init__(
             size=size,
             page_size=page_size,

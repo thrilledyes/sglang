@@ -463,7 +463,13 @@ class AscendAttnBackend(AttentionBackend):
                 "Sparsity-driven KV offload is enabled with manager %s.",
                 self.sparse_kv_manager,
             )
-        self.use_fia = get_bool_env_var("ASCEND_USE_FIA", "False")
+        self.enable_torch_compile = get_flags().capture.enable_torch_compile
+        # npugraph_ex (torch.compile) bypasses forward_decode_graph's .out FIA
+        # path and requires the functional FIA path (and per-layer KV buffer
+        # views in memory_pool_npu) rather than ATB _npu_paged_attention.
+        self.use_fia = (
+            get_bool_env_var("ASCEND_USE_FIA", "False") or self.enable_torch_compile
+        )
         self.use_fias_v2_bsnd = (
             get_bool_env_var("SGLANG_NPU_USE_FIAS_V2_BSND", "False")
             and model_runner.spec_algorithm.is_dspark()
@@ -490,7 +496,6 @@ class AscendAttnBackend(AttentionBackend):
             )
 
             self.paged_mtp_attention_decode = paged_mtp_attention_decode
-        self.enable_torch_compile = get_flags().capture.enable_torch_compile
         self.speculative_num_draft_tokens = get_spec().speculative_num_draft_tokens
         if (
             self.speculative_num_draft_tokens is not None

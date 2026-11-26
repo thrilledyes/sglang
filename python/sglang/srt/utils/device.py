@@ -134,6 +134,7 @@ __all__ = [
 
 # https://pytorch.org/docs/stable/notes/hip.html#checking-for-hip
 @lru_cache(maxsize=1)
+@torch._dynamo.assume_constant_result
 def is_hip() -> bool:
     return torch.version.hip is not None and torch.cuda.is_available()
 
@@ -146,21 +147,25 @@ else:
 
 
 @lru_cache(maxsize=1)
+@torch._dynamo.assume_constant_result
 def is_cuda():
     return torch.cuda.is_available() and torch.version.cuda is not None
 
 
 @lru_cache(maxsize=1)
+@torch._dynamo.assume_constant_result
 def is_cuda_alike():
     return is_cuda() or is_hip() or is_sail()
 
 
 @lru_cache(maxsize=1)
+@torch._dynamo.assume_constant_result
 def is_hpu() -> bool:
     return hasattr(torch, "hpu") and torch.hpu.is_available()
 
 
 @lru_cache(maxsize=1)
+@torch._dynamo.assume_constant_result
 def is_xpu() -> bool:
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
@@ -177,6 +182,7 @@ def register_xpu_device_properties_for_dynamo() -> None:
 
 
 @lru_cache(maxsize=1)
+@torch._dynamo.assume_constant_result
 def is_npu() -> bool:
     if not hasattr(torch, "npu"):
         return False

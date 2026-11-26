@@ -216,6 +216,67 @@ class TestNPUScatterPaKVCache(unittest.TestCase):
             layer_id_override=0,
         )
 
+    def test_torch_compile_disables_scatter_pa_and_uses_scatter_nd(self):
+        """Under npugraph_ex, scatter_pa is disabled to avoid full-KV-cache clones."""
+        pool = self._make_pool(use_fia=True, dtype=torch.bfloat16)
+        pool.enable_torch_compile = True
+        layer, loc, cache_k, cache_v = self._inputs(dtype=torch.bfloat16)
+        fake = SimpleNamespace(
+            npu_scatter_pa_kv_cache=MagicMock(),
+            npu_scatter_nd_update_=MagicMock(),
+            _npu_reshape_and_cache=MagicMock(),
+        )
+        with patch.object(memory_pool_npu, "torch_npu", fake, create=True):
+            pool.set_kv_buffer(layer, loc, cache_k, cache_v)
+        fake.npu_scatter_pa_kv_cache.assert_not_called()
+        self.assertEqual(fake.npu_scatter_nd_update_.call_count, 2)
+        fake._npu_reshape_and_cache.assert_not_called()
+
+    def test_torch_compile_auto_enables_fia_per_layer_views(self):
+        """enable_torch_compile=True implies use_fia=True even without ASCEND_USE_FIA."""
+        from sglang.srt.runtime_context import get_flags
+
+        with patch.dict(os.environ):
+            os.environ.pop("ASCEND_USE_FIA", None)
+            default_flags = SimpleNamespace(
+                capture=SimpleNamespace(enable_torch_compile=False)
+            )
+            with patch.object(memory_pool_npu, "get_flags", return_value=default_flags):
+                pool_default = NPUMHATokenToKVPool(
+                    size=32,
+                    page_size=16,
+                    dtype=torch.float16,
+                    head_num=2,
+                    head_dim=4,
+                    layer_num=2,
+                    device="cpu",
+                    enable_memory_saver=False,
+                    enable_alt_stream=False,
+                )
+            self.assertFalse(pool_default.use_fia)
+            self.assertIsInstance(pool_default.k_buffer, torch.Tensor)
+
+            compile_flags = SimpleNamespace(
+                capture=SimpleNamespace(enable_torch_compile=True)
+            )
+            with patch.object(memory_pool_npu, "get_flags", return_value=compile_flags):
+                pool_compiled = NPUMHATokenToKVPool(
+                    size=32,
+                    page_size=16,
+                    dtype=torch.float16,
+                    head_num=2,
+                    head_dim=4,
+                    layer_num=2,
+                    device="cpu",
+                    enable_memory_saver=False,
+                    enable_alt_stream=False,
+                )
+            self.assertTrue(pool_compiled.use_fia)
+            self.assertIsInstance(pool_compiled.k_buffer, list)
+            self.assertEqual(len(pool_compiled.k_buffer), 2)
+            # Keep get_flags referenced directly for runtime contract sanity.
+            self.assertIsNotNone(get_flags())
+
 
 if __name__ == "__main__":
     unittest.main()

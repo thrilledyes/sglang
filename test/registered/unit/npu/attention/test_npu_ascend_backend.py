@@ -1071,5 +1071,81 @@ class TestMlaPrefixFia(unittest.TestCase):
                 self._check_prefix([3, 1], [16, 32], dtype, 0, 4, page_size=16)
 
 
+class TestTorchCompileAutoFia(unittest.TestCase):
+    def test_decode_under_torch_compile_routes_to_functional_fia(self):
+        """With enable_torch_compile=True, decode uses functional FIA instead of ATB paged attention."""
+        from sglang.srt.hardware_backend.npu.attention import (
+            ascend_backend as backend_mod,
+        )
+
+        backend = object.__new__(AscendAttnBackend)
+        backend.graph_mode = True
+        backend.enable_torch_compile = True
+        backend.dense_mla_dcp_target = False
+        backend.use_mla = False
+        backend.use_fia = True
+        backend.use_fa = False
+        backend.use_quant_flash_attn = False
+        backend.use_alibi = False
+        backend.page_size = 16
+        backend.runner_ids = None
+        backend._is_swa_layer = lambda layer: False
+        backend.forward_decode_graph = MagicMock(
+            side_effect=AssertionError("must bypass .out FIA graph path under compile")
+        )
+
+        k_cache = torch.zeros((2, 16, 2, 4), dtype=torch.bfloat16)
+        v_cache = torch.zeros((2, 16, 2, 4), dtype=torch.bfloat16)
+        backend.token_to_kv_pool = SimpleNamespace(
+            set_kv_buffer=MagicMock(),
+            get_key_buffer=MagicMock(return_value=k_cache),
+            get_value_buffer=MagicMock(return_value=v_cache),
+        )
+        backend.forward_metadata = SimpleNamespace(
+            swa_out_cache_loc=None,
+            seq_lens_cpu_int=None,
+            seq_lens_cpu_list=[4, 8],
+            block_tables=torch.zeros((2, 1), dtype=torch.int32),
+            seq_lens=torch.tensor([4, 8], dtype=torch.int32),
+        )
+
+        q = torch.zeros((2, 4 * 4), dtype=torch.bfloat16)
+        k = torch.zeros((2, 2, 4), dtype=torch.bfloat16)
+        v = torch.zeros((2, 2, 4), dtype=torch.bfloat16)
+        layer = SimpleNamespace(
+            layer_id=0,
+            is_cross_attention=False,
+            tp_q_head_num=4,
+            tp_k_head_num=2,
+            tp_v_head_num=2,
+            qk_head_dim=4,
+            v_head_dim=4,
+            scaling=0.5,
+            logit_cap=0,
+        )
+        forward_batch = SimpleNamespace(
+            out_cache_loc=torch.tensor([0, 1], dtype=torch.int32),
+            encoder_lens=None,
+            batch_size=2,
+        )
+
+        expected_out = torch.ones((2, 1, 4, 4), dtype=torch.bfloat16)
+        fake_fia = MagicMock(return_value=(expected_out, None))
+        fake_npu_ops = SimpleNamespace(npu_fused_infer_attention_score=fake_fia)
+        fake_torch_npu = SimpleNamespace(_npu_paged_attention=MagicMock())
+
+        with (
+            patch.object(backend_mod, "is_mla_preprocess_enabled", return_value=False),
+            patch.object(backend_mod, "torch_npu", fake_torch_npu),
+            patch.object(torch.ops, "npu", fake_npu_ops, create=True),
+        ):
+            out = backend.forward_decode(q, k, v, layer, forward_batch)
+
+        backend.forward_decode_graph.assert_not_called()
+        fake_torch_npu._npu_paged_attention.assert_not_called()
+        fake_fia.assert_called_once()
+        self.assertEqual(out.shape, (2, 16))
+
+
 if __name__ == "__main__":
     unittest.main()
